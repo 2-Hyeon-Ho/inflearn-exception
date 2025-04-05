@@ -75,3 +75,137 @@ registry.addInterceptor(new LogInterceptor())
    `resources/static/error/4xx.html`
 3. 적용 대상이 없을 때 뷰 이름(`error` )  
    `resources/templates/error.html`
+
+
+# 04.05 공부기록
+## API 예외 처리
+
+### 컨트롤러 API 응답 추가  
+@RequestMapping에 produces 설정 추가  
+`produces = MediaType.APPLICATION_JSON_VALUE`  
+클라이언트가 요청하는 HTTP Header의 Accept값이 `application/json`일 때 해당 메서드가 호출  
+&rarr; 응답 데이터를 위해 Map에 status, message 키에 값을 할당, ResponseEntity를 사용해 응답  
+
+### 스프링 부트 기본 오류 처리  
+```
+@RequestMapping(produces = MediaType.TEXT_HTML_VALUE)
+public ModelAndView errorHtml(HttpServletRequest request, HttpServletResponse
+response) {}
+
+@RequestMapping
+public ResponseEntity<Map<String, Object>> error(HttpServletRequest request) {}
+```  
+- errorHtml()` : `produces = MediaType.TEXT_HTML_VALUE` : 클라이언트 요청의 Accept 해더 값이
+`text/html` 인 경우에는 `errorHtml()` 을 호출해서 view를 제공한다.
+- `error()` : 그외 경우에 호출되고 `ResponseEntity`
+로 HTTP Body에 JSON 데이터를 반환한다.  
+
+### HandlerExceptionResolver  
+*컨트롤러 밖으로 예외가 던져질 때 예외를 해결하고 새로운 동작을 수행할 때 사용*  
+![img.png](img.png)  
+![img_1.png](img_1.png)  
+
+```java
+public class MyHandlerExceptionResolver implements HandlerExceptionResolver {
+
+   @Override
+   public ModelAndView resolveException(HttpServletRequest request, HttpServletResponse response,
+           Object handler, Exception ex) {
+
+      try {
+         if (ex instanceof IllegalArgumentException) {
+            log.info("IllegalArgumentException resolver to 400");
+            response.sendError(HttpServletResponse.SC_BAD_REQUEST, ex.getMessage());
+            return new ModelAndView();
+         }
+      }catch (IOException e) {
+         log.error("resolver ex", e);
+      }
+
+      return null;
+   }
+}
+```
+ModelAndView를 반환하는 이유는 try,catch를 하듯이 Exception을 처리해서 정상 흐름처럼 변경  
+- **빈 ModelAndView**: `new ModelAndView()` 처럼 빈 `ModelAndView` 를 반환하면 뷰를 렌더링 하지 않고,
+정상 흐름으로 서블릿이 리턴된다.
+- **ModelAndView 지정**: `ModelAndView` 에 `View` , `Model` 등의 정보를 지정해서 반환하면 뷰를 렌더링 한
+다.
+- **null**: `null` 을 반환하면, 다음 `ExceptionResolver` 를 찾아서 실행한다. 만약 처리할 수 있는
+`ExceptionResolver` 가 없으면 예외 처리가 안되고, 기존에 발생한 예외를 서블릿 밖으로 던진다.  
+
+&rarr; 예외가 발생되면 WAS까지 예외가 던져지고 WAS에서 오류 페이지 정보를 다시 찾아서 호출  
+
+### 스프링 부트에서 제공하는 ExceptionResolver  
+1. `ExceptionHandlerExceptionResolver`
+2. `ResponseStatusExceptionResolver`
+3. `DefaultHandlerExceptionResolver` &rarr; 우선 순위가 가장 낮다.  
+
+#### ResponseStatusExceptionResolver  
+`@ResponseStatus` 가 달려있는 예외
+`ResponseStatusException` 예외  
+위의 두가지 케이스 처리  
+
+#### DefaultHandlerExceptionResolver  
+파라미터의 타입이 맞지 않으면 TypeMismatchException이 발생하는데 예외처리를 하지 않으면 500에러 발생  
+```java
+try {
+    if (ex instanceof IllegalArgumentException) { 
+        log.info("IllegalArgumentException resolver to 400");
+        response.sendError(HttpServletResponse.SC_BAD_REQUEST, ex.getMessage());
+        return new ModelAndView();
+    }
+}catch (IOException e) {
+    log.error("resolver ex", e);
+}
+```
+위와 같이 response.sendError로 400에러를 리턴하여 내부 예외 처리  
+
+#### ExceptionHandlerExceptionResolver  
+`@ExceptionHandler` 애노테이션을 사용하여 편리한 예외 처리 가능  
+```java
+@RestControllerAdvice(assignableTypes = {ApiExceptionControllerV3.class})
+public class ExControllerAdvice {
+
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ErrorResult illegalExHandler (IllegalArgumentException e){
+
+        log.error("[exceptionHandler ex]", e);
+        return new ErrorResult("BAD", e.getMessage());
+    }
+
+    @ExceptionHandler(UserException.class)  //메서드 파라미터에 해당 클래스를 받고 있다면 UserException.class 생략 가능
+    public ResponseEntity<ErrorResult> userExHandler(UserException e) {
+
+        log.error("[exceptionHandler ex]", e);
+        ErrorResult errorResult = new ErrorResult("USER-EX", e.getMessage());
+        return new ResponseEntity<>(errorResult, HttpStatus.BAD_REQUEST);
+    }
+
+    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+    @ExceptionHandler
+    public ErrorResult exHandler(Exception e) {
+
+        log.error("[exceptionHandler ex]", e);
+        return new ErrorResult("EX", "내부오류");
+    }
+}
+```
+위와 같이 `@ExceptionHandler` 애노테이션에 해당 컨트롤러에서 처리하고 싶은 예외를 지정  
+해당 예외가 발생되면 이 메서드가 호출되고 예외의 자식 클래스도 처리가능  
+
+`@ExceptionHandler`에 예외를 생략할 수 있으며 생략시 파라미터의 예외 클래스가 지정  
+
+**`@ExceptionHandler`의 경우 해당 컨트롤러에 한해서만 동작**  
+여러 컨트롤러에서 공통적으로 처리하기 위해서 `@ControllerAdvice` 또는 `@RestControllerAdvice`로 처리 가능  
+
+**특정 대상 컨트롤러 지정 방법**  
+1. 특정 애노테이션이 달린 대상만 지정  
+`@ControllerAdvice(annotations = RestController.class)`   
+<br/>
+2. 하위 패키지의 대상 지정(상품, 회원 등 도메인에 따른 패키지별로 예외처리 가능)  
+   `@ControllerAdvice("org.example.controllers")`  
+   <br/>
+3. 클래스 직접 지정  
+`@ControllerAdvice(assignableTypes = {ControllerInterface.class, AbstractController.class})`  
